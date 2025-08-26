@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Goldbach Window — Hybrid (t offsets)</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; line-height: 1.4; margin: 2rem; }
+    h1 { margin-bottom: .25rem; }
+    small { color: #555; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    input, textarea, button, select { font-size: 1rem; padding: .5rem; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    .out { margin-top: 1rem; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #fafafa; border: 1px solid #eee; padding: 1rem; border-radius: .5rem; }
+    .ok { color: #0a7; font-weight: 700; }
+    .warn { color: #b50; }
+    .err { color: #c00; font-weight: 700; }
+    .muted { color: #666; }
+    .grid { display: grid; grid-template-columns: auto auto auto auto; gap: .5rem 1rem; align-items: baseline; }
+    @media (max-width: 800px){ .grid { grid-template-columns: auto auto; } }
+  </style>
+</head>
+<body>
+  <h1>Goldbach Window — Hybrid (t offsets)</h1>
+  <small>Residue-avoidance up to P=2003 + centered weight. Optional Miller–Rabin verification in browser.</small>
+
+  <label>Even E (any size, digits only)</label>
+  <textarea id="E" rows="2" placeholder="Paste an even integer E here"></textarea>
+
+  <div class="row">
+    <div>
+      <label>How many offsets to scan around center (|t| ≤ T)?</label>
+      <input id="T" type="number" value="20000" min="10" step="10"/>
+      <small class="muted">This is just for the demo ranking; the theorem’s K(E) is far larger but not needed here.</small>
+    </div>
+    <div>
+      <label>Show top how many t values?</label>
+      <input id="TOP" type="number" value="50" min="1" step="1"/>
+    </div>
+    <div>
+      <label>P cutoff</label>
+      <select id="Psel">
+        <option value="1009">P = 1009 (faster)</option>
+        <option value="2003" selected>P = 2003 (stronger filter)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="rank">Rank Top-t (no primes)</button>
+    <button id="verify">Verify until first pair (Miller–Rabin)</button>
+    <div>
+      <label>Verify at most N top t’s</label>
+      <input id="Nverify" type="number" value="200" min="1" step="1"/>
+    </div>
+    <div>
+      <label>MR rounds (probabilistic if n ≥ 2^64)</label>
+      <input id="MRrounds" type="number" value="16" min="3" step="1"/>
+    </div>
+  </div>
+
+  <div id="out" class="out"></div>
+
+<script>
+/* ---------- Small primes up to 2003 (hard-coded) ---------- */
+const PRIMES_UP_TO_2003 = (() => {
+  const list = [];
+  const limit = 2003;
+  const sieve = new Uint8Array(limit+1); sieve.fill(1); sieve[0]=sieve[1]=0;
+  for (let p=2;p*p<=limit;p++) if (sieve[p]) for (let k=p*p;k<=limit;k+=p) sieve[k]=0;
+  for (let i=2;i<=limit;i++) if (sieve[i]) list.push(i);
+  return list;
+})();
+
+/* slice primes up to P */
+function primesUpTo(P){ return PRIMES_UP_TO_2003.filter(p => p<=P); }
+
+/* ---------- Hybrid score pieces (demo) ---------- */
+/* residue-avoidance score: count how many small primes do NOT block t (x±t ≠ 0 mod p) */
+function residueScore(xMod, t, P){
+  const ps = primesUpTo(P);
+  let ok = 0;
+  for (const p of ps){
+    const bp = BigInt(p);
+    const tp = ((t % bp)+bp)%bp;
+    const xm = xMod.get(p); // x % p
+    // forbidden iff tp ≡ +x (mod p) or tp ≡ −x (mod p)
+    const forb1 = tp === xm;
+    const forb2 = tp === ((-xm+bp) % bp);
+    if (!(forb1 || forb2)) ok++;
+  }
+  return ok;
+}
+
+/* centered weight: gently prefer smaller |t| (a Selberg-ish stabilizer) */
+function centerWeight(t, T){
+  const z = Number((t < 0n ? -t : t)) / T; // 0..1
+  // smooth bump near 0: w = 1 - z^2 (>=0)
+  return Math.max(0, 1 - z*z);
+}
+
+/* composite score = residue ok count + epsilon * center weight */
+function hybridScore(xMod, t, P, T){
+  const base = residueScore(xMod, t, P);
+  const w = centerWeight(t, T);
+  return base + 0.25 * w; // small lift for near-center
+}
+
+/* precompute x mod p for all small primes */
+function xMods(x, P){
+  const ps = primesUpTo(P);
+  const map = new Map();
+  for(const p of ps){
+    const xm = Number(x % BigInt(p)); // small, safe in Number
+    map.set(p, BigInt(xm));
+  }
+  return map;
+}
+
+/* build candidate t list with parity matching x so that x±t are odd */
+function buildCandidates(x, T){
+  const evenX = (x & 1n) === 0n;
+  const step = 2n;
+  const start = evenX ? 1n : 2n;
+  const arr = [];
+  for (let tt = start; tt <= BigInt(T); tt += step){
+    arr.push(tt);
+  }
+  return arr;
+}
+
+/* rank top t’s */
+function rankTop(Estr, T, P){
+  const out = [];
+  let E;
+  try{
+    E = BigInt(Estr.replace(/\s+/g,''));
+  }catch(e){
+    throw new Error("E must be an integer (digits only).");
+  }
+  if (E % 2n !== 0n) throw new Error("E must be even.");
+  const x = E/2n;
+  const xmod = xMods(x, P);
+  const cand = buildCandidates(x, T);
+  const Tnum = Number(T);
+  for (const t of cand){
+    const score = hybridScore(xmod, t, P, Tnum);
+    out.push({t, score});
+  }
+  out.sort((a,b)=> b.score - a.score || Number(a.t - b.t));
+  return {x, ranked: out};
+}
+
+/* ---------- Primality (BigInt) ---------- */
+/* Fast modexp */
+function modPow(base, exp, mod){
+  let b = ((base % mod) + mod) % mod;
+  let e = exp;
+  let r = 1n;
+  while (e > 0n){
+    if (e & 1n) r = (r*b) % mod;
+    b = (b*b) % mod;
+    e >>= 1n;
+  }
+  return r;
+}
+
+function isProbablePrime(n, rounds=16){
+  if (n < 2n) return false;
+  const small = [2n,3n,5n,7n,11n,13n,17n,19n,23n,29n,31n,37n];
+  for (const p of small){
+    if (n === p) return true;
+    if (n % p === 0n) return false;
+  }
+  // write n-1 = d * 2^s
+  let d = n - 1n, s = 0n;
+  while ((d & 1n) === 0n){ d >>= 1n; s++; }
+  function trial(a){
+    if (a % n === 0n) return true;
+    let x = modPow(a, d, n);
+    if (x === 1n || x === n-1n) return true;
+    for (let r = 1n; r < s; r++){
+      x = (x*x) % n;
+      if (x === n-1n) return true;
+    }
+    return false;
+  }
+  // bases: for n < 2^64, [2,3,5,7,11,13,17] is deterministic;
+  // for bigger n, use more rounds (probabilistic).
+  const bases = (n < (1n<<64n)) ? [2n,3n,5n,7n,11n,13n,17n] : small;
+  for (let i=0;i<Math.max(rounds, bases.length);i++){
+    const a = (i < bases.length) ? bases[i] : (2n + BigInt(i));
+    if (!trial(a)) return false;
+  }
+  return true;
+}
+
+/* verify top-N candidates until first pair is found */
+function verifyTop(Estr, ranked, Nmax, rounds){
+  const E = BigInt(Estr.replace(/\s+/g,''));
+  const x = E/2n;
+  let tests = 0, tried = 0;
+  for (let i=0; i<Math.min(Nmax, ranked.length); i++){
+    const t = ranked[i].t;
+    const a = x - t, b = x + t;
+    tried++;
+    if (a > 1n && b > 1n){
+      tests++; const pa = isProbablePrime(a, rounds);
+      tests++; const pb = isProbablePrime(b, rounds);
+      if (pa && pb){
+        return {found:true, t, p:a, q:b, tests, tried, rank:i+1};
+      }
+    }
+  }
+  return {found:false, tests, tried};
+}
+
+/* ---------- UI wiring ---------- */
+const out = document.getElementById('out');
+const btnRank = document.getElementById('rank');
+const btnVerify = document.getElementById('verify');
+
+btnRank.onclick = () => {
+  out.textContent = "Ranking…";
+  try{
+    const Estr = document.getElementById('E').value.trim();
+    const T = BigInt(document.getElementById('T').value);
+    const P = parseInt(document.getElementById('Psel').value,10);
+    const TOP = parseInt(document.getElementById('TOP').value,10);
+    const {x, ranked} = rankTop(Estr, T, P);
+    const lines = [];
+    lines.push(`E = ${Estr}`);
+    lines.push(`x = E/2 = ${x.toString()}`);
+    lines.push(`P = ${P}, scanned |t| ≤ ${T}, candidates = ~${Number(T)/2|0}`);
+    lines.push(`Top-${TOP} offsets by hybrid score (t, score):`);
+    for (let i=0;i<Math.min(TOP, ranked.length); i++){
+      const r = ranked[i];
+      lines.push(`${(i+1).toString().padStart(3,' ')}. t = ${r.t.toString().padStart(8,' ')}   score = ${r.score.toFixed(3)}`);
+    }
+    lines.push("\nTip: click “Verify until first pair” to test x±t (Miller–Rabin).");
+    out.textContent = lines.join("\n");
+    // stash latest ranked in window for verify step
+    window._ranked = ranked;
+  }catch(e){
+    out.innerHTML = `<span class="err">Error:</span> ${e.message}`;
+  }
+};
+
+btnVerify.onclick = () => {
+  try{
+    const Estr = document.getElementById('E').value.trim();
+    if (!window._ranked){ out.innerHTML = `<span class="warn">Run “Rank” first.</span>`; return; }
+    const Nmax = parseInt(document.getElementById('Nverify').value,10);
+    const rounds = parseInt(document.getElementById('MRrounds').value,10);
+    const t0 = performance.now();
+    const res = verifyTop(Estr, window._ranked, Nmax, rounds);
+    const t1 = performance.now();
+    if (res.found){
+      const lines = [];
+      lines.push(`✅ Found a Goldbach pair at rank ${res.rank} in ${((t1-t0)/1000).toFixed(4)} s`);
+      lines.push(`t = ${res.t.toString()}`);
+      lines.push(`p = ${res.p.toString()}`);
+      lines.push(`q = ${res.q.toString()}`);
+      lines.push(`primality tests = ${res.tests}, offsets tried = ${res.tried}`);
+      out.innerHTML = lines.join("\n");
+    }else{
+      out.innerHTML = `No pair found within first ${Nmax} ranks.\nTried ${res.tried} offsets, ${res.tests} primality tests.\nIncrease N or T.`;
+    }
+  }catch(e){
+    out.innerHTML = `<span class="err">Error:</span> ${e.message}`;
+  }
+};
+</script>
+</body>
+</html>
