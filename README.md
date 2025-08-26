@@ -9,19 +9,19 @@ Explicit hybrid theorem giving an unconditional proof of Goldbach’s conjecture
 - 🔢 **Calculator (interactive, GitHub Pages):**  
   [Open Calculator](https://b43797.github.io/goldbach-window-unconditional-proof/)
 
-- 📄 **Full Paper (HTML, GitHub Pages):**  
+- 📄 **Full Article (recommended, HTML on GitHub Pages):**  
   [Read Paper (HTML)](https://b43797.github.io/goldbach-window-unconditional-proof/paper.html)
 
-- 📄 **Paper in Markdown (raw file):**  
-  [Read PAPER.md](https://b43797.github.io/goldbach-window-unconditional-proof/PAPER.md)
+- 📄 **Markdown version (on GitHub repo):**  
+  [View PAPER.md](https://github.com/b43797/goldbach-window-unconditional-proof/blob/main/PAPER.md)
 
 ---
 
 ## Repository Contents
 
 - **index.html** — interactive demo (Goldbach window calculator).  
-- **paper.html** — full article rendered as a standalone web page.  
-- **PAPER.md** — Markdown version of the article.  
+- **paper.html** — full article rendered as a standalone web page (complete 7-page text).  
+- **PAPER.md** — Markdown version of the article (rendered fully on GitHub).  
 - **README.md** — project documentation.  
 
 ---
